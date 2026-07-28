@@ -1,5 +1,8 @@
 # Changelog
 
+## v1.0.1
+- Marked **experimental**: both features scrape Google, so they can break when Google changes its markup or shows a captcha. Treat them as last-resort fallbacks below the dedicated lyrics/artwork providers.
+
 ## v1.0.0
 - Initial release. Merges the former **google-lyrics** and **google-image-search** built-in plugins into one **Google** plugin.
 - **Lyrics** information type: searches Google for a track's lyrics and scrapes the best matching page, with preferred/blocked domain lists, a search-suffix setting, per-domain success stats, and a step-by-step debugger.
