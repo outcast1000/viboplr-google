@@ -211,6 +211,7 @@ var warmupPromise = null;
 function ensureWarmedUp(api) {
   if (warmupPromise) return warmupPromise;
   warmupPromise = new Promise(function (resolve) {
+    api.log("info", "warming up Google session (once per app run)", "google-images");
     api.network
       .openBrowseWindow(WARMUP_URL, {
         visible: false,
@@ -227,6 +228,7 @@ function ensureWarmedUp(api) {
           done = true;
           if (settleTimer) clearTimeout(settleTimer);
           if (deadline) clearTimeout(deadline);
+          api.log("info", "Google session warm-up complete", "google-images");
           handle.close().catch(console.error);
           resolve();
         }
@@ -257,16 +259,28 @@ function ensureWarmedUp(api) {
 // other window pops in the meantime.
 var searchChain = Promise.resolve();
 var lastLoadAt = 0;
+// Diagnostics: monotonic per-session counters. Every Google image search and
+// every captcha wall is logged (section "google-images") so the trigger rate is
+// visible — watch the captcha/search ratio to tune MIN_GAP or provider order.
+var imgSearchSeq = 0;
+var imgCaptchaSeq = 0;
 function noop() {}
 
 function searchGoogleImages(api, name, entity) {
   var run = searchChain.then(function () {
     return ensureWarmedUp(api).then(function () {
       var now = Date.now();
+      var sinceLast = lastLoadAt ? now - lastLoadAt : -1;
       var wait = Math.max(0, lastLoadAt + MIN_GAP + Math.random() * GAP_JITTER - now);
       return delay(wait).then(function () {
         lastLoadAt = Date.now();
-        return runOneSearch(api, name, entity);
+        var seq = ++imgSearchSeq;
+        api.log("info",
+          "image search #" + seq + " q=\"" + name + "\" (" + entity + ")"
+            + (sinceLast >= 0 ? " · " + sinceLast + "ms since last load" : "")
+            + (wait > 0 ? " · throttled " + Math.round(wait) + "ms" : ""),
+          "google-images");
+        return runOneSearch(api, name, entity, seq);
       });
     });
   });
@@ -275,8 +289,9 @@ function searchGoogleImages(api, name, entity) {
   return run;
 }
 
-function runOneSearch(api, name, entity) {
+function runOneSearch(api, name, entity, seq) {
   var searchUrl = buildSearchUrl(name, entity);
+  var startedAt = Date.now();
   return api.network
     .openBrowseWindow(searchUrl, {
       visible: false,
@@ -297,6 +312,11 @@ function runOneSearch(api, name, entity) {
           settled = true;
           if (pollTimer) clearInterval(pollTimer);
           if (deadline) clearTimeout(deadline);
+          api.log("info",
+            "image search #" + seq + " → " + (result && result.src ? "found image" : "no image")
+              + " in " + (Date.now() - startedAt) + "ms"
+              + (captchaShown ? " (after captcha)" : ""),
+            "google-images");
           handle.close().catch(console.error);
           resolve(result);
         }
@@ -312,12 +332,17 @@ function runOneSearch(api, name, entity) {
           } else if (msg.type === "consent" && !consentClicked) {
             // GDPR wall — dismiss it silently and keep polling. Never surfaced.
             consentClicked = true;
+            api.log("info", "image search #" + seq + " · GDPR consent wall auto-dismissed", "google-images");
             handle.eval(CONSENT_DISMISS_SCRIPT).catch(console.error);
             extendDeadline(CONSENT_EXTEND);
           } else if (msg.type === "captcha" && !captchaShown) {
             // Genuine reCAPTCHA — only a human can clear it. Surface the window.
             captchaShown = true;
-            api.log("info", "Google asked for captcha verification; surfacing browse window");
+            var cseq = ++imgCaptchaSeq;
+            api.log("warn",
+              "CAPTCHA shown — image search #" + seq + " q=\"" + name + "\" · captcha #" + cseq
+                + " of " + imgSearchSeq + " image searches this session; surfacing browse window",
+              "google-images");
             handle.eval(BANNER_SCRIPT).catch(console.error);
             handle.show().catch(console.error);
             extendDeadline(CAPTCHA_TIMEOUT);
@@ -600,6 +625,14 @@ function activateLyrics(api) {
   var testArtist = "Τρύπες";
   var testTitle = "Παράξενη Πόλη";
   var testState = { status: "idle", steps: [] };
+
+  // Diagnostics: monotonic per-session counters. Every automated lyrics search
+  // and every captcha wall it hits is logged (section "google-lyrics"). The
+  // lyrics search runs hidden and can't be solved, so a captcha is logged and
+  // returned as no-results — but it still trains Google's abuse wall, which is
+  // usually what makes the (visible) image-search captchas keep appearing.
+  var lyrSearchSeq = 0;
+  var lyrCaptchaSeq = 0;
 
   // Step-by-step debugger state
   var dbgTest = {
@@ -1172,6 +1205,9 @@ function activateLyrics(api) {
 
   var GOOGLE_EXTRACT_SCRIPT =
     '(function() {' +
+    '  var __u = location.href || "";' +
+    '  var __b = (document.body && document.body.innerText) || "";' +
+    '  if (__u.indexOf("/sorry/") !== -1 || /unusual traffic|automated queries/i.test(__b)) { window.__viboplr.send("search-captcha", { url: __u }); return; }' +
     '  var container = document.getElementById("search") || document.getElementById("rso");' +
     '  if (!container) return;' +
     '  var links = container.querySelectorAll("a[href]");' +
@@ -1261,6 +1297,9 @@ function activateLyrics(api) {
 
   function searchGoogle(query) {
     var searchUrl = "https://www.google.com/search?q=" + encodeURIComponent(query);
+    var seq = ++lyrSearchSeq;
+    var startedAt = Date.now();
+    api.log("info", "lyrics search #" + seq + " q=\"" + query + "\"", "google-lyrics");
 
     if (scrapeHandle) {
       scrapeHandle.close().catch(console.error);
@@ -1278,18 +1317,32 @@ function activateLyrics(api) {
         var settled = false;
         var pollTimer = null;
         var deadline = null;
+        var sawCaptcha = false;
 
         function finish(urls) {
           if (settled) return;
           settled = true;
           if (pollTimer) clearInterval(pollTimer);
           if (deadline) clearTimeout(deadline);
+          if (!sawCaptcha) {
+            api.log("info",
+              "lyrics search #" + seq + " → " + urls.length + " url(s) in " + (Date.now() - startedAt) + "ms",
+              "google-lyrics");
+          }
           resolve(urls);
         }
 
         handle.onMessage(function (msg) {
           if (msg.type === "search-results" && Array.isArray(msg.data)) {
             finish(msg.data);
+          } else if (msg.type === "search-captcha" && !sawCaptcha) {
+            sawCaptcha = true;
+            var cseq = ++lyrCaptchaSeq;
+            api.log("warn",
+              "CAPTCHA on lyrics search #" + seq + " q=\"" + query + "\" · captcha #" + cseq
+                + " of " + lyrSearchSeq + " lyrics searches this session (hidden — returned as no-results)",
+              "google-lyrics");
+            finish([]);
           }
         });
 
