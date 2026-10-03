@@ -1,5 +1,10 @@
 # Changelog
 
+## v1.1.0
+- **Runs in the plugin worker runtime.** It now gets only what it asks for
+  — `browse:www.google.com` — and can't reach anything else in the app. Viboplr asks
+  you to allow these once when you update. Requires Viboplr 1.0.85.
+
 ## v1.0.2
 - **Diagnostics logging** for the captcha problem (behavior unchanged). Every Google search is now logged with a per-session counter, and every captcha wall is logged at `warn`:
   - Images (section `google-images`): session warm-up, each search (with the gap since the last load and any anti-burst throttle), GDPR consent auto-dismissals, captchas (`captcha #C of N searches`), and each search's outcome/timing.
